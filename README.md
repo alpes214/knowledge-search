@@ -23,3 +23,9 @@ npm install
 npm run dev
 # → http://localhost:3000
 ```
+
+## Licence
+
+Released under **GNU AGPL v3.0** — see `LICENSE`.
+
+A **commercial licence** is available for closed-source integrations, hosted SaaS without source disclosure, or organisations whose policy disallows AGPL components. See `COMMERCIAL.md`.
