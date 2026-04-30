@@ -1,0 +1,12 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: ks-postgres
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_PASSWORD: localdev
+      POSTGRES_DB: kb
+    volumes: [pg_data:/var/lib/postgresql/data]
+
+volumes:
+  pg_data:
