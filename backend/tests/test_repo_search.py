@@ -34,7 +34,7 @@ def _vec(seed: int, dim: int = 1024) -> list[float]:
 
 async def test_insert_list_and_status(postgres_session: AsyncSession) -> None:
     doc = await insert_document(postgres_session, filename="visa-rules.pdf")
-    assert doc.status == "processing"
+    assert doc.status == "pending"
 
     docs = await list_documents(postgres_session)
     assert [d.filename for d in docs] == ["visa-rules.pdf"]

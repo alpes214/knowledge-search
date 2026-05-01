@@ -17,6 +17,7 @@ dependencies = [
     "langchain-text-splitters>=0.3",
     "python-multipart>=0.0.12",
     "openai>=1.50",
+    "procrastinate>=3.8.1",
 ]
 
 [dependency-groups]
@@ -52,7 +53,28 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI idioms: Depends, File, Query, Body, Path, Header, Cookie, Form
+# all REQUIRE call-in-default. Whitelist them here so B008 doesn't fire.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Query",
+    "fastapi.Body",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Cookie",
+]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "backend.tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_decorators = false
+check_untyped_defs = true

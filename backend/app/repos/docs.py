@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import DocChunk, Document
@@ -34,11 +34,31 @@ class ChunkResult:
     score is in [0, 1]; closer to 1 = more relevant."""
 
 
-async def insert_document(session: AsyncSession, *, filename: str) -> Document:
-    doc = Document(filename=filename, status="processing")
+async def insert_document(
+    session: AsyncSession,
+    *,
+    filename: str,
+    sha256: str | None = None,
+    status: str = "pending",
+) -> Document:
+    doc = Document(filename=filename, sha256=sha256, status=status)
     session.add(doc)
     await session.flush()
     return doc
+
+
+async def find_by_sha256(session: AsyncSession, sha256: str) -> Document | None:
+    """Return the most recent non-failed `Document` with the given sha256, or
+    `None`. Used for upload idempotency: a re-upload of the same bytes returns
+    the existing in-flight or completed document instead of starting again."""
+    stmt = (
+        select(Document)
+        .where(Document.sha256 == sha256)
+        .where(Document.status.in_(("pending", "processing", "ready")))
+        .order_by(Document.uploaded_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def update_status(
@@ -48,6 +68,7 @@ async def update_status(
     status: str,
     page_count: int | None = None,
     chunk_count: int | None = None,
+    error_message: str | None = None,
 ) -> None:
     doc = await session.get(Document, doc_id)
     if doc is None:
@@ -57,6 +78,8 @@ async def update_status(
         doc.page_count = page_count
     if chunk_count is not None:
         doc.chunk_count = chunk_count
+    if error_message is not None:
+        doc.error_message = error_message
     await session.flush()
 
 
@@ -75,21 +98,24 @@ async def insert_chunks_batch(
     doc_id: UUID,
     chunks: Iterable[ChunkData],
 ) -> int:
+    """Bulk-insert chunks via Core `insert(DocChunk)` — ~10× faster than
+    `add_all` at the 1000-row scale (`insertmanyvalues` ships them as one
+    multi-row INSERT). Note: the dict keys use the SQL column name `metadata`,
+    not the ORM attribute `chunk_metadata`."""
     rows = [
-        DocChunk(
-            document_id=doc_id,
-            text=c.text,
-            embedding=c.embedding,
-            page=c.page,
-            heading=c.heading,
-            chunk_metadata=c.metadata,
-        )
+        {
+            "document_id": doc_id,
+            "text": c.text,
+            "embedding": c.embedding,
+            "page": c.page,
+            "heading": c.heading,
+            "metadata": c.metadata,
+        }
         for c in chunks
     ]
     if not rows:
         return 0
-    session.add_all(rows)
-    await session.flush()
+    await session.execute(insert(DocChunk), rows)
     return len(rows)
 
 

@@ -40,7 +40,9 @@ class Document(Base):
         nullable=False,
         server_default=func.now(),
     )
-    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="processing")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="pending")
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunk_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

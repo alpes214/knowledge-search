@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -52,3 +53,33 @@ async def postgres_session(postgres_engine: AsyncEngine) -> AsyncIterator[AsyncS
                 yield session
             finally:
                 await outer.rollback()
+
+
+@pytest_asyncio.fixture
+async def committing_session(postgres_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+    """Non-transactional session for tests that exercise code which opens its
+    own sessions (e.g., the ingest pipeline running outside the request scope).
+    Tracks all `Document` rows created during the test and deletes them at
+    teardown so the database stays clean."""
+    from sqlalchemy import delete as _delete
+    from sqlalchemy import select as _select
+
+    from backend.app.db.models import Document
+
+    sessionmaker = async_sessionmaker(postgres_engine, expire_on_commit=False)
+    before_ids: set[Any] = set()
+    async with sessionmaker() as snapshot:
+        rows = await snapshot.execute(_select(Document.id))
+        before_ids = {r[0] for r in rows.all()}
+
+    session = sessionmaker()
+    try:
+        yield session
+    finally:
+        await session.close()
+        async with sessionmaker() as cleanup:
+            rows = await cleanup.execute(_select(Document.id))
+            new_ids = {r[0] for r in rows.all()} - before_ids
+            if new_ids:
+                await cleanup.execute(_delete(Document).where(Document.id.in_(new_ids)))
+                await cleanup.commit()

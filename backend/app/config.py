@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +19,8 @@ class Settings(BaseSettings):
     docs_chunk_size: int = 800
     docs_chunk_overlap: int = 100
     docs_top_k: int = 5
+
+    staging_dir: Path = Path("/tmp/ks-staging")
 
     max_agent_iterations: int = 8
     log_level: str = "INFO"

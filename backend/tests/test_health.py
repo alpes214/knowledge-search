@@ -40,6 +40,6 @@ async def test_docs_health_endpoint(
 
 
 async def test_unimplemented_endpoints_return_501(client: AsyncClient) -> None:
-    assert (await client.post("/docs")).status_code == 501
+    # POST /docs is implemented in Phase 3.
     assert (await client.get("/search?q=x")).status_code == 501
     assert (await client.post("/ask", json={})).status_code == 501

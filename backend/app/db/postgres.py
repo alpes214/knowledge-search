@@ -76,6 +76,20 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+def session_factory() -> async_sessionmaker[AsyncSession]:
+    """For background tasks running outside the request scope (e.g. Procrastinate
+    workers). The request session yielded by `get_session` is closed by FastAPI
+    once the response is sent; tasks need their own.
+
+    Self-initializes lazily on first call so worker processes that didn't run
+    `init_postgres()` (e.g. the Procrastinate worker CLI) still work."""
+    global _engine, _sessionmaker
+    if _sessionmaker is None:
+        _engine = create_async_engine(settings.database_url, pool_pre_ping=True, pool_size=5)
+        _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
+    return _sessionmaker
+
+
 def _redact(url: str) -> str:
     if "@" not in url:
         return url
