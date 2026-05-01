@@ -1,9 +1,18 @@
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
+from backend.app.config import settings
 from backend.app.main import app
 
 
@@ -14,14 +23,32 @@ async def client() -> AsyncIterator[AsyncClient]:
         yield c
 
 
-@pytest.fixture
-def postgres_url(request: pytest.FixtureRequest) -> Iterator[str]:
-    """Spin up a one-off Postgres container; opt-in via @pytest.mark.postgres.
+@pytest_asyncio.fixture
+async def postgres_engine() -> AsyncIterator[AsyncEngine]:
+    """Engine pointed at the dev `ks-postgres` (already running, migration
+    applied). Function-scoped so each test gets its own connection pool tied
+    to its own event loop — avoids cross-loop asyncpg errors. Skips the
+    marked tests if the DB is unreachable."""
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except OperationalError as e:
+        await engine.dispose()
+        pytest.skip(f"postgres not reachable at {settings.database_url}: {e}")
+    yield engine
+    await engine.dispose()
 
-    Default `pytest` runs do NOT start Docker; only `pytest -m postgres` will."""
-    if "postgres" not in {m.name for m in request.node.iter_markers()}:
-        pytest.skip("postgres fixture requires @pytest.mark.postgres")
-    from testcontainers.postgres import PostgresContainer
 
-    with PostgresContainer("pgvector/pgvector:pg17", driver="asyncpg") as pg:
-        yield pg.get_connection_url()
+@pytest_asyncio.fixture
+async def postgres_session(postgres_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+    """Per-test transactional session. Always rolls back at teardown so tests
+    leave no rows behind, regardless of order."""
+    sessionmaker = async_sessionmaker(postgres_engine, expire_on_commit=False)
+    async with postgres_engine.connect() as conn:
+        outer = await conn.begin()
+        async with sessionmaker(bind=conn) as session:
+            try:
+                yield session
+            finally:
+                await outer.rollback()

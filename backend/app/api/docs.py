@@ -16,4 +16,4 @@ async def upload() -> JSONResponse:
 
 @router.get("/health")
 async def health() -> dict[str, str]:
-    return {"postgres": "ok" if postgres.is_healthy() else "down"}
+    return {"postgres": postgres.status()}

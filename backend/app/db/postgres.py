@@ -1,7 +1,9 @@
 import logging
 from collections.abc import AsyncIterator
+from typing import Literal
 
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -15,42 +17,56 @@ log = logging.getLogger(__name__)
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
-_pg_healthy: bool = False
+
+PgStatus = Literal["ok", "schema_missing", "down"]
+_pg_status: PgStatus = "down"
 
 
 async def init_postgres() -> None:
-    """Open the async engine and probe with `SELECT 1`. On failure log a warning
-    and leave the app running with `_pg_healthy=False` so unrelated routes work."""
-    global _engine, _sessionmaker, _pg_healthy
+    """Open the async engine, probe connectivity, and check that the schema is
+    present (`doc_chunks` exists). On failure, log and leave the app running
+    so unrelated routes still work — `/health` reports the status."""
+    global _engine, _sessionmaker, _pg_status
     _engine = create_async_engine(settings.database_url, pool_pre_ping=True, pool_size=5)
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
     try:
         async with _engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
-        _pg_healthy = True
-        log.info("postgres ready url=%s", _redact(settings.database_url))
+            try:
+                await conn.execute(text("SELECT 1 FROM doc_chunks LIMIT 0"))
+                _pg_status = "ok"
+                log.info("postgres ready url=%s", _redact(settings.database_url))
+            except ProgrammingError:
+                _pg_status = "schema_missing"
+                log.warning(
+                    "postgres reachable but schema missing — run `alembic upgrade head`"
+                )
     except Exception as e:
-        _pg_healthy = False
+        _pg_status = "down"
         log.warning("postgres unreachable: %s", e)
 
 
 async def close_postgres() -> None:
-    global _engine, _sessionmaker, _pg_healthy
+    global _engine, _sessionmaker, _pg_status
     if _engine is not None:
         await _engine.dispose()
     _engine = None
     _sessionmaker = None
-    _pg_healthy = False
+    _pg_status = "down"
+
+
+def status() -> PgStatus:
+    return _pg_status
 
 
 def is_healthy() -> bool:
-    return _pg_healthy
+    return _pg_status == "ok"
 
 
-def set_healthy(value: bool) -> None:
+def set_status(value: PgStatus) -> None:
     """Test hook only; production code uses `init_postgres` to set this."""
-    global _pg_healthy
-    _pg_healthy = value
+    global _pg_status
+    _pg_status = value
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

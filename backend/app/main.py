@@ -6,7 +6,8 @@ from fastapi import FastAPI
 
 from backend.app.api import ask, docs, search
 from backend.app.config import settings
-from backend.app.db.postgres import close_postgres, init_postgres, is_healthy
+from backend.app.db.postgres import close_postgres, init_postgres
+from backend.app.db.postgres import status as pg_status
 from backend.app.logging_conf import configure_logging
 
 log = logging.getLogger(__name__)
@@ -32,4 +33,4 @@ app.include_router(ask.router)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "postgres": "ok" if is_healthy() else "down"}
+    return {"status": "ok", "postgres": pg_status()}
