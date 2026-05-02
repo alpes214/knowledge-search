@@ -67,12 +67,11 @@ async def update_status(
     if doc is None:
         return
     doc.status = status
+    doc.error_message = error_message
     if page_count is not None:
         doc.page_count = page_count
     if chunk_count is not None:
         doc.chunk_count = chunk_count
-    if error_message is not None:
-        doc.error_message = error_message
     await session.flush()
 
 

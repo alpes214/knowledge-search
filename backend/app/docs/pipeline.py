@@ -26,9 +26,12 @@ async def ingest(doc_id: UUID) -> None:
         log.info('ingest done doc=%s pages=%d chunks=%d', doc_id, page_count, len(embedded))
     except Exception as e:
         log.exception('ingest failed doc=%s', doc_id)
-        await _set_status(
-            doc_id, status='failed', error_message=str(e)[:_ERROR_MESSAGE_MAX_LEN]
-        )
+        try:
+            await _set_status(
+                doc_id, status='failed', error_message=str(e)[:_ERROR_MESSAGE_MAX_LEN]
+            )
+        except Exception:
+            log.exception('also failed to mark doc as failed doc=%s', doc_id)
         raise
 
 
