@@ -12,6 +12,10 @@ _BATCH_SIZE = 32
 _client: httpx.AsyncClient | None = None
 
 
+class TeiUnavailable(Exception):
+    pass
+
+
 def _get_client() -> httpx.AsyncClient:
     global _client
     if _client is None:
@@ -33,7 +37,10 @@ async def close() -> None:
 
 async def _embed_batch(batch: list[str]) -> list[list[float]]:
     payload: dict[str, Any] = {'model': settings.embed_model, 'input': batch}
-    response = await _get_client().post('/embeddings', json=payload)
+    try:
+        response = await _get_client().post('/embeddings', json=payload)
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        raise TeiUnavailable(str(e) or e.__class__.__name__) from e
     response.raise_for_status()
     body = response.json()
 

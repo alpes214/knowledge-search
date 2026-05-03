@@ -20,14 +20,16 @@ class ChunkData:
 
 @dataclass(frozen=True)
 class ChunkResult:
+    chunk_id: int
     document_id: UUID
+    filename: str
     text: str
     page: int | None
     heading: str | None
     metadata: dict[str, Any] | None
     score: float
-    """1 - cosine_distance. With L2-normalised embeddings (e.g. bge-m3) the
-    score is in [0, 1]; closer to 1 = more relevant."""
+    # 1 - cosine_distance. With L2-normalised embeddings (e.g. bge-m3) the
+    # score is in [0, 1]; closer to 1 = more relevant.
 
 
 async def insert_document(
@@ -115,7 +117,12 @@ async def vector_search(
     doc_ids: list[UUID] | None = None,
 ) -> list[ChunkResult]:
     distance = DocChunk.embedding.cosine_distance(query_vec)
-    stmt = select(DocChunk, distance.label('distance')).order_by(distance).limit(k)
+    stmt = (
+        select(DocChunk, Document.filename, distance.label('distance'))
+        .join(Document, Document.id == DocChunk.document_id)
+        .order_by(distance, DocChunk.id)
+        .limit(k)
+    )
     if doc_ids:
         stmt = stmt.where(DocChunk.document_id.in_(doc_ids))
 
@@ -123,12 +130,14 @@ async def vector_search(
     rows = result.all()
     return [
         ChunkResult(
+            chunk_id=chunk.id,
             document_id=chunk.document_id,
+            filename=filename,
             text=chunk.text,
             page=chunk.page,
             heading=chunk.heading,
             metadata=chunk.chunk_metadata,
             score=1.0 - float(distance),
         )
-        for chunk, distance in rows
+        for chunk, filename, distance in rows
     ]

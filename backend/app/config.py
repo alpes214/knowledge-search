@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     docs_chunk_overlap: int = 100
     docs_top_k: int = 5
 
+    search_min_score: float = 0.3
+
     staging_dir: Path = Path('/tmp/ks-staging')
 
     max_agent_iterations: int = 8
