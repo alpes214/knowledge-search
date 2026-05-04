@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api import ask, docs, search
 from backend.app.config import settings
@@ -32,6 +33,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title='Knowledge Search', lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allow_origins,
+    allow_credentials=False,
+    allow_methods=['GET', 'POST', 'DELETE', 'OPTIONS'],
+    allow_headers=['*'],
+)
 app.include_router(docs.router)
 app.include_router(search.router)
 app.include_router(ask.router)
