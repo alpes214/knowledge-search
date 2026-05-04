@@ -94,3 +94,45 @@ async def test_get_unknown_doc_returns_404() -> None:
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         r = await client.get(f'/docs/{uuid4()}')
         assert r.status_code == 404
+
+
+@respx.mock
+async def test_get_doc_pdf_returns_inline_pdf() -> None:
+    import json as _json
+
+    respx.post(f'{settings.embed_base_url}/embeddings').mock(
+        side_effect=lambda r: httpx.Response(
+            200,
+            json={
+                'data': [
+                    {'index': i, 'embedding': _vec(i)}
+                    for i in range(len(_json.loads(r.content)['input']))
+                ]
+            },
+        )
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        upload = await client.post(
+            '/docs', files={'file': ('sample.pdf', FIXTURE.read_bytes(), 'application/pdf')}
+        )
+        assert upload.status_code == 201
+        doc_id = upload.json()['doc_id']
+
+        pdf = await client.get(f'/docs/{doc_id}/pdf')
+        assert pdf.status_code == 200
+        assert pdf.headers['content-type'] == 'application/pdf'
+        assert pdf.headers['content-disposition'].startswith('inline')
+        assert pdf.content == FIXTURE.read_bytes()
+
+        await client.delete(f'/docs/{doc_id}')
+
+
+async def test_get_doc_pdf_unknown_doc_returns_404() -> None:
+    from uuid import uuid4
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(f'/docs/{uuid4()}/pdf')
+        assert r.status_code == 404

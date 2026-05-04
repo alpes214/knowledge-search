@@ -101,7 +101,7 @@ async def _post_ask(question: str) -> tuple[int, str]:
 
 @respx.mock
 async def test_ask_happy_path(committing_session: AsyncSession, monkeypatch) -> None:
-    await _seed_doc_with_chunks(committing_session, 'doc-a.pdf', seeds=[1, 2, 3])
+    doc_id = await _seed_doc_with_chunks(committing_session, 'doc-a.pdf', seeds=[1, 2, 3])
     _mock_tei_returns(query_seed=2)
 
     final = (
@@ -126,9 +126,13 @@ async def test_ask_happy_path(committing_session: AsyncSession, monkeypatch) -> 
     done = next(d for t, d in events if t == 'done')
     assert done['answer'].startswith('The answer is yes [1].')
     assert len(done['citations']) == 1
-    assert done['citations'][0]['n'] == 1
-    assert done['citations'][0]['filename'] == 'doc-a.pdf'
-    assert done['citations'][0]['page'] == 2
+    citation = done['citations'][0]
+    assert citation['n'] == 1
+    assert citation['filename'] == 'doc-a.pdf'
+    assert citation['page'] == 2
+    # chunk_id and document_id must be resolved from tool_result chunks, not zero/empty.
+    assert citation['chunk_id'] != 0
+    assert citation['document_id'] == str(doc_id)
 
 
 @respx.mock

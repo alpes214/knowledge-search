@@ -37,13 +37,15 @@ async def test_insert_list_and_status(postgres_session: AsyncSession) -> None:
     assert doc.status == 'pending'
 
     docs = await list_documents(postgres_session)
-    assert [d.filename for d in docs] == ['visa-rules.pdf']
+    inserted = next(d for d in docs if d.id == doc.id)
+    assert inserted.filename == 'visa-rules.pdf'
 
     await update_status(postgres_session, doc.id, status='ready', page_count=120, chunk_count=300)
     docs = await list_documents(postgres_session)
-    assert docs[0].status == 'ready'
-    assert docs[0].page_count == 120
-    assert docs[0].chunk_count == 300
+    inserted = next(d for d in docs if d.id == doc.id)
+    assert inserted.status == 'ready'
+    assert inserted.page_count == 120
+    assert inserted.chunk_count == 300
 
 
 async def test_vector_search_returns_top1(postgres_session: AsyncSession) -> None:
@@ -159,7 +161,12 @@ async def test_vector_search_doc_id_filter_no_match(postgres_session: AsyncSessi
     assert results == []
 
 
-async def test_vector_search_empty_table(postgres_session: AsyncSession) -> None:
-    """Search over a table with no chunks returns an empty list."""
-    results = await vector_search(postgres_session, _vec(seed=999), k=5)
+async def test_vector_search_no_matching_doc_returns_empty(
+    postgres_session: AsyncSession,
+) -> None:
+    """Filtering by a non-existent doc_id yields an empty list, regardless of
+    what other docs exist in the table."""
+    results = await vector_search(
+        postgres_session, _vec(seed=999), k=5, doc_ids=[uuid4()]
+    )
     assert results == []

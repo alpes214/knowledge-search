@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -115,6 +116,29 @@ async def get_doc(
         chunk_count=doc.chunk_count,
         error_message=doc.error_message,
         uploaded_at=doc.uploaded_at,
+    )
+
+
+@router.get('/{doc_id}/pdf')
+async def get_doc_pdf(
+    doc_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> FileResponse:
+    from backend.app.db.models import Document
+
+    doc = await session.get(Document, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail='document not found')
+
+    staging_file = settings.staging_dir / f'{doc_id}.pdf'
+    if not staging_file.exists():
+        raise HTTPException(status_code=404, detail='document file not in staging')
+
+    return FileResponse(
+        path=staging_file,
+        media_type='application/pdf',
+        filename=doc.filename,
+        headers={'Content-Disposition': f'inline; filename="{doc.filename}"'},
     )
 
 

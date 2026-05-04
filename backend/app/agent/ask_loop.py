@@ -63,6 +63,7 @@ async def run(
         {'role': 'user', 'content': question},
     ]
     final_text_parts: list[str] = []
+    chunks_seen: list[dict[str, Any]] = []
     input_tokens_total = 0
     output_tokens_total = 0
     iterations_done = 0
@@ -104,7 +105,7 @@ async def run(
 
             if not tool_calls:
                 final = '\n'.join(final_text_parts).strip()
-                citations = _parse_citations(final)
+                citations = _parse_citations(final, chunks_seen)
                 yield done_event(answer=final, citations=citations)
                 return
 
@@ -134,6 +135,7 @@ async def run(
                     yield error_event(code=e.code, detail=e.detail, retriable=True)
                     return
 
+                chunks_seen.extend(chunks)
                 yield tool_result_event(id=tc.id, result=result_str, chunks=chunks)
                 messages.append(
                     {
@@ -191,7 +193,7 @@ _SOURCE_LINE = re.compile(
 )
 
 
-def _parse_citations(answer: str) -> list[Citation]:
+def _parse_citations(answer: str, chunks_seen: list[dict[str, Any]]) -> list[Citation]:
     if not answer:
         return []
     cited_numbers = sorted({int(m.group(1)) for m in _INLINE_MARKER.finditer(answer)})
@@ -210,14 +212,35 @@ def _parse_citations(answer: str) -> list[Citation]:
         src = sources.get(n)
         if src is None:
             continue
+        match = _find_chunk(chunks_seen, src['filename'], src['page'], src['heading'])
         citations.append(
             {
                 'n': n,
-                'chunk_id': 0,
-                'document_id': '',
+                'chunk_id': int(match['chunk_id']) if match else 0,
+                'document_id': str(match['document_id']) if match else '',
                 'filename': src['filename'],
                 'page': src['page'],
                 'heading': src['heading'],
             }
         )
     return citations
+
+
+def _find_chunk(
+    chunks: list[dict[str, Any]], filename: str, page: int, heading: str | None
+) -> dict[str, Any] | None:
+    # Heading text may include markdown bold (`**Field 63.1**`) the LLM stripped
+    # in its citation -- compare loosely on substring after stripping markdown
+    # asterisks and trimming whitespace.
+    target = (heading or '').replace('*', '').strip().lower()
+    for c in chunks:
+        if c.get('filename') != filename or c.get('page') != page:
+            continue
+        chunk_heading = (c.get('heading') or '').replace('*', '').strip().lower()
+        if not target or target in chunk_heading or chunk_heading in target:
+            return c
+    # Fallback: filename+page only (heading mismatch).
+    for c in chunks:
+        if c.get('filename') == filename and c.get('page') == page:
+            return c
+    return None
