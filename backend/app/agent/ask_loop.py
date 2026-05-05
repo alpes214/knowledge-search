@@ -1,8 +1,4 @@
-# Pattern adapted from agent-platform/agent_platform/agent/loop.py
-# Stripped: ticket persistence (Message/Ticket DB writes), Kafka publishing,
-# history loading. Added: error event emission for SSE, client-disconnect
-# detection, malformed tool_calls handling, citation parsing for done event,
-# server-side argument validation in dispatch (lives in tools.py).
+# Pattern adapted from agent-platform/agent_platform/agent/loop.py.
 
 import json
 import logging
@@ -28,6 +24,16 @@ from backend.app.agent.tools import LLMUnavailable, ToolFailed
 from backend.app.config import settings
 
 log = logging.getLogger(__name__)
+
+_RETRIABLE_LLM_EXCEPTIONS = (
+    httpx.ConnectError,
+    httpx.TimeoutException,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
+_MAX_TOKENS_PER_REPLY = 1024
 
 
 class LLMClient(Protocol):
@@ -64,37 +70,20 @@ async def run(
     ]
     final_text_parts: list[str] = []
     chunks_seen: list[dict[str, Any]] = []
-    input_tokens_total = 0
-    output_tokens_total = 0
+    input_tokens = 0
+    output_tokens = 0
     iterations_done = 0
 
     try:
-        for iteration in range(max_iterations):
-            iterations_done = iteration + 1
+        for _ in range(max_iterations):
+            iterations_done += 1
             if is_disconnected is not None and await is_disconnected():
                 return
 
-            try:
-                resp = await llm_client.chat.completions.create(
-                    model=settings.llm_model,
-                    messages=messages,
-                    tools=tools,
-                    max_tokens=1024,
-                )
-            except (
-                httpx.ConnectError,
-                httpx.TimeoutException,
-                APIConnectionError,
-                APITimeoutError,
-                InternalServerError,
-                RateLimitError,
-            ) as e:
-                raise LLMUnavailable(str(e) or e.__class__.__name__) from e
-
-            usage = getattr(resp, 'usage', None)
-            if usage is not None:
-                input_tokens_total += getattr(usage, 'prompt_tokens', 0) or 0
-                output_tokens_total += getattr(usage, 'completion_tokens', 0) or 0
+            resp = await _call_llm(llm_client, messages=messages, tools=tools)
+            d_in, d_out = _token_deltas(resp)
+            input_tokens += d_in
+            output_tokens += d_out
 
             msg = resp.choices[0].message
             tool_calls = getattr(msg, 'tool_calls', None) or []
@@ -104,86 +93,130 @@ async def run(
                 yield text_event(msg.content)
 
             if not tool_calls:
-                final = '\n'.join(final_text_parts).strip()
-                citations = _parse_citations(final, chunks_seen)
-                yield done_event(answer=final, citations=citations)
+                final_answer = '\n'.join(final_text_parts).strip()
+                yield done_event(
+                    answer=final_answer,
+                    citations=_parse_citations(final_answer, chunks_seen),
+                )
                 return
 
-            messages.append(_assistant_message(msg))
+            messages.append(_assistant_message(msg.content, tool_calls))
 
             for tc in tool_calls:
-                arguments_raw = tc.function.arguments
                 try:
-                    arguments = json.loads(arguments_raw)
+                    arguments = json.loads(tc.function.arguments)
                 except (json.JSONDecodeError, TypeError):
-                    yield error_event(
-                        code='malformed_tool_call',
-                        detail=f'invalid JSON in tool arguments: {arguments_raw!r}',
-                        retriable=False,
-                    )
+                    yield _malformed_tool_call_event(tc.function.arguments)
                     return
 
-                yield tool_use_event(
-                    id=tc.id, name=tc.function.name, arguments=arguments
-                )
+                yield tool_use_event(id=tc.id, name=tc.function.name, arguments=arguments)
 
                 try:
-                    result_str, chunks = await dispatch(
-                        tc.function.name, arguments, session
-                    )
+                    result_str, chunks = await dispatch(tc.function.name, arguments, session)
                 except ToolFailed as e:
-                    yield error_event(code=e.code, detail=e.detail, retriable=True)
+                    yield _tool_failed_event(e)
                     return
 
                 chunks_seen.extend(chunks)
                 yield tool_result_event(id=tc.id, result=result_str, chunks=chunks)
-                messages.append(
-                    {
-                        'role': 'tool',
-                        'tool_call_id': tc.id,
-                        'content': result_str,
-                    }
-                )
+                messages.append(_tool_message(tc.id, result_str))
 
-        yield error_event(
-            code='iteration_limit_exceeded',
-            detail=f'agent did not produce a final answer in {max_iterations} iterations',
-            retriable=False,
-        )
+        yield _iteration_limit_event(max_iterations)
     except LLMUnavailable as e:
-        yield error_event(
-            code='llm_unavailable', detail=f'LLM service unavailable: {e}', retriable=True
-        )
+        yield _llm_unavailable_event(e)
     except Exception as e:
         log.exception('ask_loop crashed')
-        yield error_event(
-            code='internal', detail=f'internal error: {e.__class__.__name__}', retriable=False
-        )
+        yield _internal_error_event(e)
     finally:
-        latency_ms = int((time.monotonic() - start) * 1000)
-        log.info(
-            'ask completed iterations=%d input_tokens=%d output_tokens=%d latency_ms=%d',
-            iterations_done, input_tokens_total, output_tokens_total, latency_ms,
+        _log_completion(start, iterations_done, input_tokens, output_tokens)
+
+
+async def _call_llm(
+    client: LLMClient, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+) -> Any:
+    try:
+        return await client.chat.completions.create(
+            model=settings.llm_model,
+            messages=messages,
+            tools=tools,
+            max_tokens=_MAX_TOKENS_PER_REPLY,
         )
+    except _RETRIABLE_LLM_EXCEPTIONS as e:
+        raise LLMUnavailable(str(e) or e.__class__.__name__) from e
 
 
-def _assistant_message(sdk_message: Any) -> dict[str, Any]:
-    tool_calls = getattr(sdk_message, 'tool_calls', None) or []
+def _token_deltas(resp: Any) -> tuple[int, int]:
+    usage = getattr(resp, 'usage', None)
+    return (
+        getattr(usage, 'prompt_tokens', 0) or 0,
+        getattr(usage, 'completion_tokens', 0) or 0,
+    )
+
+
+def _assistant_message(content: str | None, tool_calls: list[Any]) -> dict[str, Any]:
     return {
         'role': 'assistant',
-        'content': sdk_message.content,
+        'content': content,
         'tool_calls': [
             {
                 'id': tc.id,
                 'type': 'function',
-                'function': {
-                    'name': tc.function.name,
-                    'arguments': tc.function.arguments,
-                },
+                'function': {'name': tc.function.name, 'arguments': tc.function.arguments},
             }
             for tc in tool_calls
         ],
     }
+
+
+def _tool_message(tool_call_id: str, result: str) -> dict[str, Any]:
+    return {'role': 'tool', 'tool_call_id': tool_call_id, 'content': result}
+
+
+def _log_completion(
+    start: float, iterations: int, input_tokens: int, output_tokens: int
+) -> None:
+    latency_ms = int((time.monotonic() - start) * 1000)
+    log.info(
+        'ask completed iterations=%d input_tokens=%d output_tokens=%d latency_ms=%d',
+        iterations, input_tokens, output_tokens, latency_ms,
+    )
+
+
+def _malformed_tool_call_event(arguments_raw: str) -> AgentEvent:
+    return error_event(
+        code='malformed_tool_call',
+        detail=f'invalid JSON in tool arguments: {arguments_raw!r}',
+        retriable=False,
+    )
+
+
+def _tool_failed_event(e: ToolFailed) -> AgentEvent:
+    return error_event(code=e.code, detail=e.detail, retriable=True)
+
+
+def _iteration_limit_event(max_iterations: int) -> AgentEvent:
+    return error_event(
+        code='iteration_limit_exceeded',
+        detail=f'agent did not produce a final answer in {max_iterations} iterations',
+        retriable=False,
+    )
+
+
+def _llm_unavailable_event(e: LLMUnavailable) -> AgentEvent:
+    return error_event(
+        code='llm_unavailable',
+        detail=f'LLM service unavailable: {e}',
+        retriable=True,
+    )
+
+
+def _internal_error_event(e: Exception) -> AgentEvent:
+    # Redact str(e) -- only the class name reaches the client.
+    return error_event(
+        code='internal',
+        detail=f'internal error: {e.__class__.__name__}',
+        retriable=False,
+    )
 
 
 _INLINE_MARKER = re.compile(r'\[(\d+)\]')
@@ -196,9 +229,25 @@ _SOURCE_LINE = re.compile(
 def _parse_citations(answer: str, chunks_seen: list[dict[str, Any]]) -> list[Citation]:
     if not answer:
         return []
-    cited_numbers = sorted({int(m.group(1)) for m in _INLINE_MARKER.finditer(answer)})
-    if not cited_numbers:
+    cited = _cited_marker_numbers(answer)
+    if not cited:
         return []
+    sources = _source_lines(answer)
+    citations: list[Citation] = []
+    for n in cited:
+        src = sources.get(n)
+        if src is None:
+            continue
+        match = _find_chunk(chunks_seen, src['filename'], src['page'], src['heading'])
+        citations.append(_make_citation(n, src, match))
+    return citations
+
+
+def _cited_marker_numbers(answer: str) -> list[int]:
+    return sorted({int(m.group(1)) for m in _INLINE_MARKER.finditer(answer)})
+
+
+def _source_lines(answer: str) -> dict[int, dict[str, Any]]:
     sources: dict[int, dict[str, Any]] = {}
     for m in _SOURCE_LINE.finditer(answer):
         n = int(m.group(1))
@@ -207,40 +256,36 @@ def _parse_citations(answer: str, chunks_seen: list[dict[str, Any]]) -> list[Cit
             'page': int(m.group('page')),
             'heading': (m.group('heading') or '').strip() or None,
         }
-    citations: list[Citation] = []
-    for n in cited_numbers:
-        src = sources.get(n)
-        if src is None:
-            continue
-        match = _find_chunk(chunks_seen, src['filename'], src['page'], src['heading'])
-        citations.append(
-            {
-                'n': n,
-                'chunk_id': int(match['chunk_id']) if match else 0,
-                'document_id': str(match['document_id']) if match else '',
-                'filename': src['filename'],
-                'page': src['page'],
-                'heading': src['heading'],
-            }
-        )
-    return citations
+    return sources
+
+
+def _make_citation(n: int, src: dict[str, Any], match: dict[str, Any] | None) -> Citation:
+    return {
+        'n': n,
+        'chunk_id': int(match['chunk_id']) if match else 0,
+        'document_id': str(match['document_id']) if match else '',
+        'filename': src['filename'],
+        'page': src['page'],
+        'heading': src['heading'],
+    }
+
+
+def _normalize_heading(s: str | None) -> str:
+    # The LLM may strip markdown bold (**Field 63.1**) when citing.
+    return (s or '').replace('*', '').strip().lower()
 
 
 def _find_chunk(
     chunks: list[dict[str, Any]], filename: str, page: int, heading: str | None
 ) -> dict[str, Any] | None:
-    # Heading text may include markdown bold (`**Field 63.1**`) the LLM stripped
-    # in its citation -- compare loosely on substring after stripping markdown
-    # asterisks and trimming whitespace.
-    target = (heading or '').replace('*', '').strip().lower()
-    for c in chunks:
-        if c.get('filename') != filename or c.get('page') != page:
-            continue
-        chunk_heading = (c.get('heading') or '').replace('*', '').strip().lower()
-        if not target or target in chunk_heading or chunk_heading in target:
+    same_page = [c for c in chunks if c.get('filename') == filename and c.get('page') == page]
+    if not same_page:
+        return None
+    target = _normalize_heading(heading)
+    if not target:
+        return same_page[0]
+    for c in same_page:
+        h = _normalize_heading(c.get('heading'))
+        if target in h or h in target:
             return c
-    # Fallback: filename+page only (heading mismatch).
-    for c in chunks:
-        if c.get('filename') == filename and c.get('page') == page:
-            return c
-    return None
+    return same_page[0]

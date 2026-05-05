@@ -10,6 +10,7 @@ dist/
 build/
 .coverage
 htmlcov/
+playground/
 
 # frontend
 node_modules/
