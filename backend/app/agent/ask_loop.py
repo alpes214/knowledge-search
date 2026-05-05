@@ -63,6 +63,10 @@ async def run(
     max_iterations: int,
     is_disconnected: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[AgentEvent]:
+    # Per-request state. `messages` is the OpenAI-format conversation
+    # the agent sees on each LLM call; the rest accumulate streamed
+    # prose, retrieved chunks (used later for citation resolution),
+    # and stats logged on completion.
     start = time.monotonic()
     messages: list[dict[str, Any]] = [
         {'role': 'system', 'content': system_prompt},
@@ -75,11 +79,18 @@ async def run(
     iterations_done = 0
 
     try:
+        # Each iteration of this outer loop is one LLM round-trip:
+        # call the model, then either finish (no tool calls) or
+        # process the requested tool calls and loop again.
         for _ in range(max_iterations):
             iterations_done += 1
+
+            # Bail silently if the SSE consumer disconnected. No event
+            # is yielded because there is no client to receive it.
             if is_disconnected is not None and await is_disconnected():
                 return
 
+            # Ask the LLM for the next move (more prose, or a tool call).
             resp = await _call_llm(llm_client, messages=messages, tools=tools)
             d_in, d_out = _token_deltas(resp)
             input_tokens += d_in
@@ -88,10 +99,14 @@ async def run(
             msg = resp.choices[0].message
             tool_calls = getattr(msg, 'tool_calls', None) or []
 
+            # Stream any prose the model emitted this turn.
             if msg.content:
                 final_text_parts.append(msg.content)
                 yield text_event(msg.content)
 
+            # No tool calls means the model is done. Assemble the
+            # final answer, resolve [N] markers to (document, page)
+            # citations, and emit `done`.
             if not tool_calls:
                 final_answer = '\n'.join(final_text_parts).strip()
                 yield done_event(
@@ -100,34 +115,53 @@ async def run(
                 )
                 return
 
+            # The model wants tool results. Record its assistant turn
+            # so subsequent LLM calls see the same conversation.
             messages.append(_assistant_message(msg.content, tool_calls))
 
+            # Process each requested tool call in order.
             for tc in tool_calls:
+                # Parse the SDK-provided JSON args. A malformed payload
+                # is a non-retriable model bug; abort the stream.
                 try:
                     arguments = json.loads(tc.function.arguments)
                 except (json.JSONDecodeError, TypeError):
                     yield _malformed_tool_call_event(tc.function.arguments)
                     return
 
+                # Tell the client a tool is running so the UI can
+                # show a "searching..." affordance.
                 yield tool_use_event(id=tc.id, name=tc.function.name, arguments=arguments)
 
+                # Dispatch the tool. ToolFailed is retriable from the
+                # client's perspective; the user can resubmit.
                 try:
                     result_str, chunks = await dispatch(tc.function.name, arguments, session)
                 except ToolFailed as e:
                     yield _tool_failed_event(e)
                     return
 
+                # Remember which chunks were retrieved so citation
+                # markers can be resolved when the model finalises.
                 chunks_seen.extend(chunks)
                 yield tool_result_event(id=tc.id, result=result_str, chunks=chunks)
+                # Feed the tool result back into the conversation
+                # for the next LLM call.
                 messages.append(_tool_message(tc.id, result_str))
 
+        # Outer loop exhausted: the model never converged on a final answer.
         yield _iteration_limit_event(max_iterations)
     except LLMUnavailable as e:
+        # Connection / timeout / 5xx from the LLM. Retriable: the
+        # network blip might clear on resubmit.
         yield _llm_unavailable_event(e)
     except Exception as e:
+        # Catch-all so a generator crash still produces a well-formed
+        # SSE event instead of an HTTP 500 mid-stream.
         log.exception('ask_loop crashed')
         yield _internal_error_event(e)
     finally:
+        # Always log on completion, whether normal, errored, or cancelled.
         _log_completion(start, iterations_done, input_tokens, output_tokens)
 
 
