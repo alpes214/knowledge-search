@@ -54,7 +54,7 @@ export function ChatPanel({ onOpenViewer }: ChatPanelProps) {
           setSubmitted('');
           setSearchResults(null);
         }}
-        className="border-b px-4 pt-3"
+        className="border-b px-4 py-3"
       >
         <TabsList>
           <TabsTrigger value="ask">Ask</TabsTrigger>

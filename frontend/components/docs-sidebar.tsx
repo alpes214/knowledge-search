@@ -102,6 +102,16 @@ export function DocsSidebar({ docs, onDocsChange }: DocsSidebarProps) {
         )}
       </div>
 
+      <div className="border-t p-3">
+        <Button
+          size="sm"
+          className="w-full min-h-[60px]"
+          onClick={() => setUploadOpen(true)}
+        >
+          <Upload className="h-3 w-3" /> Upload
+        </Button>
+      </div>
+
       <UploadDialog
         open={uploadOpen}
         onOpenChange={setUploadOpen}

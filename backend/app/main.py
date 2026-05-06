@@ -32,7 +32,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info('knowledge-search stopped')
 
 
-app = FastAPI(title='Knowledge Search', lifespan=lifespan)
+app = FastAPI(
+    title='Knowledge Search',
+    lifespan=lifespan,
+    docs_url='/api-docs',
+    redoc_url='/api-redoc',
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allow_origins,
