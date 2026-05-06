@@ -1,12 +1,12 @@
 'use client';
 
-import { FileText, Trash2, Upload } from 'lucide-react';
+import { FileText, Upload } from 'lucide-react';
 import * as React from 'react';
 
 import { UploadDialog } from '@/components/upload-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { deleteDoc, listDocs } from '@/lib/api';
+import { listDocs } from '@/lib/api';
 import type { DocStatus, DocumentOut } from '@/lib/types';
 
 export interface DocsSidebarProps {
@@ -40,11 +40,6 @@ export function DocsSidebar({ docs, onDocsChange }: DocsSidebarProps) {
     } finally {
       setLoading(false);
     }
-  }
-
-  async function handleDelete(id: string) {
-    await deleteDoc(id);
-    onDocsChange(docs.filter((d) => d.id !== id));
   }
 
   return (
@@ -89,13 +84,6 @@ export function DocsSidebar({ docs, onDocsChange }: DocsSidebarProps) {
                     </div>
                   )}
                 </div>
-                <button
-                  onClick={() => handleDelete(doc.id)}
-                  className="invisible group-hover:visible text-muted-foreground hover:text-destructive"
-                  aria-label="Delete document"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
               </li>
             ))}
           </ul>
